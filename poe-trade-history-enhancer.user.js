@@ -1,0 +1,875 @@
+// ==UserScript==
+// @name         PoE Trade History Enhancer
+// @namespace    https://github.com/claespettersson/poe-trade-history-enhancer
+// @version      0.2.1
+// @description  Enhances https://www.pathofexile.com/trade/history with a sortable/filterable table, "new" highlighting, and copy-item-text.
+// @author       You
+// @match        https://www.pathofexile.com/trade/history*
+// @run-at       document-start
+// @grant        GM_addStyle
+// @grant        GM_setClipboard
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const STORAGE_KEY = "pthEnhancer.settings.v1";
+  const STORAGE_SEEN_KEY = "pthEnhancer.seenItemIds.v1";
+
+  /** @type {{onlyNew: boolean, hideOriginal: boolean, preferredCurrency: string}} */
+  const settings = loadSettings();
+
+  /** @type {Set<string>} */
+  const seenItemIds = loadSeenSet();
+
+  /** @type {null | { league: string, result: any[] }} */
+  let lastPayload = null;
+
+  const ui = createUi();
+  installNetworkSniffer();
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot, { once: true });
+  } else {
+    boot();
+  }
+
+  function boot() {
+    document.body.appendChild(ui.root);
+    ui.updateSettings(settings);
+    ui.setStatus("Waiting for data…");
+    ui.onRefresh(() => refresh());
+    ui.onSettingsChange((next) => {
+      Object.assign(settings, next);
+      saveSettings(settings);
+      applyHideOriginal();
+      if (lastPayload) renderFromPayload(lastPayload);
+    });
+    ui.onMarkAllSeen(() => {
+      if (!lastPayload) return;
+      for (const row of lastPayload.result) {
+        const id = row?.item_id;
+        if (typeof id === "string" && id) seenItemIds.add(id);
+      }
+      persistSeenSet(seenItemIds);
+      renderFromPayload(lastPayload);
+    });
+
+    applyHideOriginal();
+
+    // If the page already loaded without calling the API (or our sniffer missed it), do a first fetch.
+    refresh();
+  }
+
+  async function refresh() {
+    try {
+      const league = detectLeagueFromDom() ?? lastPayload?.league ?? null;
+      if (!league) {
+        ui.setStatus("Select a league (or wait for the page to load data) …");
+        return;
+      }
+      ui.setStatus(`Loading history for "${league}"…`);
+      const payload = await fetchHistory(league);
+      handleHistoryPayload(league, payload);
+    } catch (err) {
+      ui.setStatus(`Error: ${stringifyError(err)}`);
+    }
+  }
+
+  function handleHistoryPayload(league, payload) {
+    if (!payload || typeof payload !== "object" || !Array.isArray(payload.result)) {
+      ui.setStatus("Unexpected API response (missing result[]).");
+      return;
+    }
+
+    lastPayload = { league, result: payload.result };
+    renderFromPayload(lastPayload);
+  }
+
+  function renderFromPayload(payload) {
+    const { league, result } = payload;
+
+    // Sort by time desc (ISO-8601, safe to Date parse).
+    const rows = [...result].sort((a, b) => {
+      const ta = Date.parse(a?.time ?? 0);
+      const tb = Date.parse(b?.time ?? 0);
+      return tb - ta;
+    });
+
+    const now = Date.now();
+    let newCount = 0;
+
+    /** @type {Array<ReturnType<typeof normalizeRow>>} */
+    const normalized = [];
+    for (const row of rows) {
+      const n = normalizeRow(row);
+      if (!n) continue;
+      const isNew = !seenItemIds.has(n.itemId);
+      if (isNew) newCount += 1;
+      if (settings.onlyNew && !isNew) continue;
+      normalized.push(n);
+    }
+
+    ui.setHeader({
+      league,
+      count: normalized.length,
+      newCount,
+      lastUpdated: now,
+    });
+
+    ui.renderStats(computeIncomeStats(normalized, { preferredCurrency: settings.preferredCurrency }));
+
+    ui.renderTable(normalized, {
+      isNew: (itemId) => !seenItemIds.has(itemId),
+      onCopyItemText: (itemText) => {
+        GM_setClipboard(itemText, { type: "text", mimetype: "text/plain" });
+        ui.toast("Copied item text");
+      },
+      onMarkSeen: (itemId) => {
+        seenItemIds.add(itemId);
+        persistSeenSet(seenItemIds);
+        if (lastPayload) renderFromPayload(lastPayload);
+      },
+    });
+
+    ui.setStatus("Ready");
+  }
+
+  function applyHideOriginal() {
+    const hide = !!settings.hideOriginal;
+    document.documentElement.dataset.pthHideOriginal = hide ? "1" : "0";
+  }
+
+  function installNetworkSniffer() {
+    // Sniff fetch
+    const originalFetch = window.fetch;
+    window.fetch = async function (input, init) {
+      const res = await originalFetch.call(this, input, init);
+      trySniffResponse(input, res);
+      return res;
+    };
+
+    // Sniff XHR (in case PoE uses it)
+    const originalOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      this.__pthUrl = url;
+      return originalOpen.apply(this, arguments);
+    };
+    const originalSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function () {
+      this.addEventListener(
+        "load",
+        () => {
+          try {
+            const url = this.__pthUrl;
+            if (!isHistoryApiUrl(url)) return;
+            const text = this.responseType && this.responseType !== "text" ? null : this.responseText;
+            if (!text) return;
+            const json = JSON.parse(text);
+            const league = extractLeagueFromHistoryUrl(url);
+            if (!league) return;
+            handleHistoryPayload(league, json);
+          } catch {
+            // ignore
+          }
+        },
+        { once: true },
+      );
+      return originalSend.apply(this, arguments);
+    };
+  }
+
+  async function trySniffResponse(input, res) {
+    try {
+      const url = typeof input === "string" ? input : input?.url;
+      if (!isHistoryApiUrl(url)) return;
+      // Clone so the page can still read it.
+      const clone = res.clone();
+      const json = await clone.json();
+      const league = extractLeagueFromHistoryUrl(url);
+      if (!league) return;
+      handleHistoryPayload(league, json);
+    } catch {
+      // ignore
+    }
+  }
+
+  function isHistoryApiUrl(url) {
+    return typeof url === "string" && url.includes("/api/trade/history/");
+  }
+
+  function extractLeagueFromHistoryUrl(url) {
+    if (typeof url !== "string") return null;
+    const idx = url.indexOf("/api/trade/history/");
+    if (idx < 0) return null;
+    const leaguePart = url.slice(idx + "/api/trade/history/".length);
+    if (!leaguePart) return null;
+    try {
+      return decodeURIComponent(leaguePart);
+    } catch {
+      return leaguePart;
+    }
+  }
+
+  async function fetchHistory(league) {
+    const url = `/api/trade/history/${encodeURIComponent(league)}`;
+    const res = await fetch(url, {
+      method: "GET",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    return await res.json();
+  }
+
+  function detectLeagueFromDom() {
+    // Heuristic: find a <select> that looks like a league selector.
+    const selects = Array.from(document.querySelectorAll("select"));
+    for (const sel of selects) {
+      const id = (sel.id || "").toLowerCase();
+      const name = (sel.getAttribute("name") || "").toLowerCase();
+      const cls = (sel.className || "").toString().toLowerCase();
+      const looksLikeLeague = [id, name, cls].some((s) => s.includes("league"));
+      if (!looksLikeLeague) continue;
+      const opt = sel.selectedOptions?.[0];
+      const value = (opt?.value || "").trim();
+      if (value) return value;
+      const text = (opt?.textContent || "").trim();
+      if (text) return text;
+    }
+
+    // Backup: any option that is selected inside a league-ish container.
+    const maybe = document.querySelector(
+      "[id*='league' i] select option:checked, [class*='league' i] select option:checked, [name*='league' i] option:checked",
+    );
+    const value = (maybe?.value || "").trim();
+    if (value) return value;
+    const text = (maybe?.textContent || "").trim();
+    return text || null;
+  }
+
+  function normalizeRow(row) {
+    const itemId = row?.item_id;
+    const timeIso = row?.time;
+    if (!itemId || !timeIso) return null;
+    const timeMs = Date.parse(timeIso);
+    if (!Number.isFinite(timeMs)) return null;
+
+    const item = row?.item ?? null;
+
+    const typeLine = (item?.typeLine || "").trim();
+    const baseType = (item?.baseType || "").trim();
+    const category = categoryLabel(item?.frameType);
+    const ilvl = typeof item?.ilvl === "number" ? item.ilvl : null;
+
+    const rawPriceAmount = row?.price?.amount;
+    const rawPriceCurrency = row?.price?.currency;
+    const priceAmount = typeof rawPriceAmount === "number" && Number.isFinite(rawPriceAmount) ? rawPriceAmount : null;
+    const priceCurrency = typeof rawPriceCurrency === "string" ? normalizeCurrency(rawPriceCurrency) : null;
+    const priceText = priceAmount != null && priceCurrency ? `${formatAmount(priceAmount)} ${priceCurrency}` : "";
+
+    const note = typeof item?.note === "string" ? item.note : "";
+    const mods = [
+      ...(Array.isArray(item?.implicitMods) ? item.implicitMods : []),
+      ...(Array.isArray(item?.explicitMods) ? item.explicitMods : []),
+      ...(Array.isArray(item?.utilityMods) ? item.utilityMods : []),
+      ...(Array.isArray(item?.craftedMods) ? item.craftedMods : []),
+      ...(Array.isArray(item?.enchantMods) ? item.enchantMods : []),
+    ].filter((m) => typeof m === "string" && m.trim().length > 0);
+
+    const extendedTextB64 = item?.extended?.text;
+    const itemText = typeof extendedTextB64 === "string" ? decodeItemText(extendedTextB64) : null;
+
+    return {
+      itemId,
+      timeIso,
+      timeMs,
+      timeLocal: formatLocalTime(timeIso),
+      timeAgo: formatTimeAgo(timeIso),
+      name: typeLine || baseType || "(unknown)",
+      baseType: baseType || "",
+      category,
+      ilvl,
+      priceText,
+      priceAmount,
+      priceCurrency,
+      note,
+      mods,
+      itemText,
+      icon: typeof item?.icon === "string" ? item.icon : null,
+    };
+  }
+
+  function categoryLabel(frameType) {
+    // https://www.poewiki.net/wiki/Item_class#Frame_types (rough mapping, but fine for labeling)
+    switch (frameType) {
+      case 0:
+        return "Normal";
+      case 1:
+        return "Magic";
+      case 2:
+        return "Rare";
+      case 3:
+        return "Unique";
+      case 4:
+        return "Gem";
+      case 5:
+        return "Currency";
+      case 6:
+        return "Divination";
+      case 7:
+        return "Quest";
+      default:
+        return "";
+    }
+  }
+
+  function normalizeCurrency(currency) {
+    return String(currency || "")
+      .trim()
+      .toLowerCase();
+  }
+
+  function formatAmount(amount) {
+    if (!Number.isFinite(amount)) return "";
+    if (Number.isInteger(amount)) return String(amount);
+    return String(Number(amount.toFixed(2)));
+  }
+
+  function decodeItemText(b64) {
+    try {
+      // PoE uses base64 of the in-game copy text.
+      const decoded = atob(b64);
+      // Normalize newlines for clipboard.
+      return decoded.replace(/\r\n/g, "\n");
+    } catch {
+      return null;
+    }
+  }
+
+  function formatLocalTime(iso) {
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return iso;
+    return new Date(t).toLocaleString();
+  }
+
+  function formatTimeAgo(iso) {
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return "";
+    const deltaMs = Date.now() - t;
+    const deltaSec = Math.floor(deltaMs / 1000);
+    if (deltaSec < 0) return "in the future";
+    if (deltaSec < 60) return `${deltaSec}s ago`;
+    const deltaMin = Math.floor(deltaSec / 60);
+    if (deltaMin < 60) return `${deltaMin}m ago`;
+    const deltaHr = Math.floor(deltaMin / 60);
+    if (deltaHr < 48) return `${deltaHr}h ago`;
+    const deltaDay = Math.floor(deltaHr / 24);
+    return `${deltaDay}d ago`;
+  }
+
+  function clampInt(n, min, max) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return min;
+    return Math.max(min, Math.min(max, Math.floor(x)));
+  }
+
+  function stringifyError(err) {
+    if (err instanceof Error) return err.message || String(err);
+    return String(err);
+  }
+
+  function loadSettings() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return defaultSettings();
+      const parsed = JSON.parse(raw);
+      return {
+        onlyNew: !!parsed.onlyNew,
+        hideOriginal: !!parsed.hideOriginal,
+        preferredCurrency: typeof parsed.preferredCurrency === "string" ? normalizeCurrency(parsed.preferredCurrency) || "chaos" : "chaos",
+      };
+    } catch {
+      return defaultSettings();
+    }
+  }
+
+  function defaultSettings() {
+    return { onlyNew: false, hideOriginal: false, preferredCurrency: "chaos" };
+  }
+
+  function saveSettings(next) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  }
+
+  function loadSeenSet() {
+    try {
+      const raw = localStorage.getItem(STORAGE_SEEN_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return new Set();
+      return new Set(parsed.filter((x) => typeof x === "string"));
+    } catch {
+      return new Set();
+    }
+  }
+
+  function persistSeenSet(set) {
+    // Keep it bounded so localStorage doesn't grow forever.
+    const arr = Array.from(set);
+    const bounded = arr.slice(Math.max(0, arr.length - 2000));
+    localStorage.setItem(STORAGE_SEEN_KEY, JSON.stringify(bounded));
+  }
+
+  function createUi() {
+    GM_addStyle(`
+      .pth-root{position:sticky;top:0;z-index:9999;background:#0b0f14;border-bottom:1px solid #1d2a36;color:#e6eef7;font:12px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+      .pth-wrap{max-width:1400px;margin:0 auto;padding:10px 12px}
+      .pth-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+      .pth-title{font-size:13px;font-weight:600;margin-right:auto}
+      .pth-muted{opacity:.75}
+      .pth-btn{background:#16212b;color:#e6eef7;border:1px solid #223444;border-radius:6px;padding:6px 8px;cursor:pointer}
+      .pth-btn:hover{background:#1a2732}
+      .pth-btn:active{transform:translateY(1px)}
+      .pth-input{background:#0f1720;color:#e6eef7;border:1px solid #223444;border-radius:6px;padding:6px 8px}
+      .pth-table{width:100%;border-collapse:collapse;margin-top:10px}
+      .pth-table th,.pth-table td{border-top:1px solid #1d2a36;padding:6px 8px;vertical-align:top}
+      .pth-table th{position:sticky;top:52px;background:#0b0f14;z-index:1;text-align:left;font-weight:600}
+      .pth-badge{display:inline-block;border:1px solid #223444;border-radius:999px;padding:2px 8px;background:#0f1720}
+      .pth-new{background:rgba(60,120,255,.12)}
+      .pth-icon{width:26px;height:26px;object-fit:contain}
+      .pth-mods{max-width:720px}
+      .pth-mod{display:inline-block;margin:0 6px 4px 0;padding:2px 6px;border-radius:6px;background:#101a24;border:1px solid #1d2a36}
+      .pth-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-top:10px}
+      .pth-card{border:1px solid #1d2a36;background:#0f1720;border-radius:10px;padding:8px}
+      .pth-card-title{font-weight:600;margin-bottom:6px}
+      .pth-mini{width:100%;border-collapse:collapse}
+      .pth-mini th,.pth-mini td{border-top:1px solid #1d2a36;padding:4px 6px;vertical-align:top}
+      .pth-mini th{text-align:left;font-weight:600;opacity:.9}
+      .pth-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;background:#101a24;color:#e6eef7;border:1px solid #223444;border-radius:10px;padding:8px 12px;z-index:10000;opacity:0;pointer-events:none;transition:opacity .15s ease}
+      .pth-toast.pth-show{opacity:1}
+      html[data-pth-hide-original="1"] body > *:not(.pth-root){display:none !important}
+    `);
+
+    const root = el("div", { class: "pth-root" });
+    const wrap = el("div", { class: "pth-wrap" });
+    root.appendChild(wrap);
+
+    const title = el("div", { class: "pth-title", text: "PoE Trade History Enhancer" });
+    const header = el("div", { class: "pth-muted", text: "" });
+    const status = el("div", { class: "pth-muted", text: "" });
+
+    const refreshBtn = el("button", { class: "pth-btn", text: "Refresh" });
+    const markAllSeenBtn = el("button", { class: "pth-btn", text: "Mark all seen" });
+
+    const onlyNewToggle = el("input", { type: "checkbox" });
+    const onlyNewLabel = el("label", { class: "pth-badge" }, [onlyNewToggle, el("span", { text: " Only new" })]);
+
+    const hideOriginalToggle = el("input", { type: "checkbox" });
+    const hideOriginalLabel = el("label", { class: "pth-badge" }, [hideOriginalToggle, el("span", { text: " Hide original page" })]);
+
+    const preferredCurrencyInput = el("input", { class: "pth-input", value: "chaos", placeholder: "chaos" });
+    preferredCurrencyInput.style.width = "90px";
+    const preferredCurrencyLabel = el("label", { class: "pth-badge" }, [
+      el("span", { text: " Best/worst in " }),
+      preferredCurrencyInput,
+    ]);
+
+    const filterInput = el("input", { class: "pth-input", placeholder: "Filter (name/mod/note)…" });
+    filterInput.style.flex = "1 1 260px";
+
+    const topRow = el("div", { class: "pth-row" }, [
+      title,
+      header,
+      refreshBtn,
+      markAllSeenBtn,
+      onlyNewLabel,
+      hideOriginalLabel,
+      preferredCurrencyLabel,
+    ]);
+
+    const secondRow = el("div", { class: "pth-row" }, [filterInput, status]);
+    wrap.appendChild(topRow);
+    wrap.appendChild(secondRow);
+
+    const statsWrap = el("div", { class: "pth-stats" });
+    wrap.appendChild(statsWrap);
+
+    const tableWrap = el("div");
+    wrap.appendChild(tableWrap);
+
+    const toastEl = el("div", { class: "pth-toast", text: "" });
+    document.documentElement.appendChild(toastEl);
+
+    /** @type {null | ((next: any) => void)} */
+    let onSettingsChange = null;
+    /** @type {null | (() => void)} */
+    let onRefresh = null;
+    /** @type {null | (() => void)} */
+    let onMarkAllSeen = null;
+
+    refreshBtn.addEventListener("click", () => onRefresh?.());
+    markAllSeenBtn.addEventListener("click", () => onMarkAllSeen?.());
+    onlyNewToggle.addEventListener("change", () => {
+      onSettingsChange?.({ onlyNew: onlyNewToggle.checked });
+    });
+    hideOriginalToggle.addEventListener("change", () => {
+      onSettingsChange?.({ hideOriginal: hideOriginalToggle.checked });
+    });
+    preferredCurrencyInput.addEventListener("change", () => {
+      onSettingsChange?.({ preferredCurrency: normalizeCurrency(preferredCurrencyInput.value) || "chaos" });
+    });
+
+    filterInput.addEventListener("input", () => {
+      const q = (filterInput.value || "").trim().toLowerCase();
+      const rows = Array.from(tableWrap.querySelectorAll("tbody tr"));
+      for (const tr of rows) {
+        const hay = (tr.getAttribute("data-hay") || "").toLowerCase();
+        tr.style.display = !q || hay.includes(q) ? "" : "none";
+      }
+    });
+
+    return {
+      root,
+      setHeader({ league, count, newCount, lastUpdated }) {
+        const dt = new Date(lastUpdated).toLocaleTimeString();
+        const newPart = newCount ? ` • ${newCount} new` : "";
+        header.textContent = `League: ${league} • Showing: ${count}${newPart} • Updated: ${dt}`;
+      },
+      setStatus(text) {
+        status.textContent = text;
+      },
+      updateSettings(next) {
+        onlyNewToggle.checked = !!next.onlyNew;
+        hideOriginalToggle.checked = !!next.hideOriginal;
+        preferredCurrencyInput.value = next.preferredCurrency || "chaos";
+      },
+      onSettingsChange(fn) {
+        onSettingsChange = fn;
+      },
+      onRefresh(fn) {
+        onRefresh = fn;
+      },
+      onMarkAllSeen(fn) {
+        onMarkAllSeen = fn;
+      },
+      toast(message) {
+        toastEl.textContent = message;
+        toastEl.classList.add("pth-show");
+        setTimeout(() => toastEl.classList.remove("pth-show"), 900);
+      },
+      /**
+       * @param {ReturnType<typeof computeIncomeStats>} stats
+       */
+      renderStats(stats) {
+        statsWrap.innerHTML = "";
+
+        const totalsCard = el("div", { class: "pth-card" });
+        totalsCard.appendChild(el("div", { class: "pth-card-title", text: "Income totals" }));
+        totalsCard.appendChild(
+          el("div", { class: "pth-muted", text: `${stats.trades} trades • ${stats.pricedTrades} priced` }),
+        );
+        totalsCard.appendChild(el("div", { text: stats.totalText || "—" }));
+        statsWrap.appendChild(totalsCard);
+
+        const bestWorstCard = el("div", { class: "pth-card" });
+        bestWorstCard.appendChild(el("div", { class: "pth-card-title", text: `Best / worst day (${stats.preferredCurrency})` }));
+        bestWorstCard.appendChild(el("div", { html: stats.bestWorstHtml }));
+        statsWrap.appendChild(bestWorstCard);
+
+        statsWrap.appendChild(renderStatsTableCard("Income per category", ["Category", "Trades", "Income"], stats.byCategory));
+        statsWrap.appendChild(renderStatsTableCard("Income per day", ["Day", "Trades", "Income"], stats.byDay));
+        statsWrap.appendChild(renderStatsTableCard("Income per week", ["Week", "Trades", "Income"], stats.byWeek));
+      },
+      /**
+       * @param {Array<any>} rows
+       * @param {{isNew: (itemId: string) => boolean, onCopyItemText: (text: string) => void, onMarkSeen: (itemId: string) => void}} handlers
+       */
+      renderTable(rows, handlers) {
+        tableWrap.innerHTML = "";
+
+        const table = el("table", { class: "pth-table" });
+        const thead = el("thead");
+        const tbody = el("tbody");
+        table.appendChild(thead);
+        table.appendChild(tbody);
+
+        thead.appendChild(
+          el("tr", {}, [
+            el("th", { text: "Time" }),
+            el("th", { text: "Item" }),
+            el("th", { text: "iLvl" }),
+            el("th", { text: "Price" }),
+            el("th", { text: "Note" }),
+            el("th", { text: "Mods" }),
+            el("th", { text: "Actions" }),
+          ]),
+        );
+
+        for (const r of rows) {
+          const isNew = handlers.isNew(r.itemId);
+          const hay = [r.name, r.baseType, r.category, r.note, r.priceText, ...(r.mods || [])].join(" • ");
+
+          const tr = el("tr", { class: isNew ? "pth-new" : "", attr: { "data-hay": hay } });
+
+          const timeCell = el("td", {}, [
+            el("div", { text: r.timeAgo || "" }),
+            el("div", { class: "pth-muted", text: r.timeLocal || r.timeIso }),
+          ]);
+
+          const itemCell = el("td");
+          const itemRow = el("div", { class: "pth-row" });
+          if (r.icon) itemRow.appendChild(el("img", { class: "pth-icon", src: r.icon, alt: "" }));
+          const itemText = el("div");
+          itemText.appendChild(el("div", { text: r.name }));
+          const sub = [r.category, r.baseType].filter(Boolean).join(" • ");
+          if (sub) itemText.appendChild(el("div", { class: "pth-muted", text: sub }));
+          itemRow.appendChild(itemText);
+          itemCell.appendChild(itemRow);
+
+          const ilvlCell = el("td", { text: r.ilvl != null ? String(r.ilvl) : "" });
+          const priceCell = el("td", { text: r.priceText || "" });
+          const noteCell = el("td", { text: r.note || "" });
+
+          const modsCell = el("td", { class: "pth-mods" });
+          if (Array.isArray(r.mods) && r.mods.length) {
+            for (const m of r.mods.slice(0, 16)) modsCell.appendChild(el("span", { class: "pth-mod", text: m }));
+            if (r.mods.length > 16) modsCell.appendChild(el("span", { class: "pth-muted", text: `+${r.mods.length - 16} more…` }));
+          }
+
+          const actionsCell = el("td");
+          const seenBtn = el("button", { class: "pth-btn", text: isNew ? "Mark seen" : "Seen" });
+          seenBtn.disabled = !isNew;
+          seenBtn.addEventListener("click", () => handlers.onMarkSeen(r.itemId));
+
+          const copyBtn = el("button", { class: "pth-btn", text: r.itemText ? "Copy item text" : "No item text" });
+          copyBtn.disabled = !r.itemText;
+          copyBtn.addEventListener("click", () => {
+            if (!r.itemText) return;
+            handlers.onCopyItemText(r.itemText);
+          });
+
+          const actionRow = el("div", { class: "pth-row" }, [seenBtn, copyBtn]);
+          actionsCell.appendChild(actionRow);
+
+          tr.appendChild(timeCell);
+          tr.appendChild(itemCell);
+          tr.appendChild(ilvlCell);
+          tr.appendChild(priceCell);
+          tr.appendChild(noteCell);
+          tr.appendChild(modsCell);
+          tr.appendChild(actionsCell);
+
+          tbody.appendChild(tr);
+        }
+
+        tableWrap.appendChild(table);
+      },
+    };
+  }
+
+  function renderStatsTableCard(title, headerCells, rows) {
+    const card = el("div", { class: "pth-card" });
+    card.appendChild(el("div", { class: "pth-card-title", text: title }));
+
+    const table = el("table", { class: "pth-mini" });
+    const thead = el("thead");
+    const tbody = el("tbody");
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    thead.appendChild(el("tr", {}, headerCells.map((h) => el("th", { text: h }))));
+
+    for (const r of rows) {
+      tbody.appendChild(el("tr", {}, [el("td", { text: r.label }), el("td", { text: String(r.count) }), el("td", { text: r.incomeText || "—" })]));
+    }
+
+    if (!rows.length) tbody.appendChild(el("tr", {}, [el("td", { class: "pth-muted", text: "No data", attr: { colspan: "3" } })]));
+
+    card.appendChild(table);
+    return card;
+  }
+
+  function computeIncomeStats(rows, { preferredCurrency }) {
+    const preferred = normalizeCurrency(preferredCurrency) || "chaos";
+
+    /** @type {Map<string, number>} */
+    const totalByCurrency = new Map();
+    /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
+    const byCategory = new Map();
+    /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
+    const byDay = new Map();
+    /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
+    const byWeek = new Map();
+
+    let pricedTrades = 0;
+
+    for (const r of rows) {
+      const t = r?.timeMs;
+      if (!Number.isFinite(t)) continue;
+
+      const dayKey = localDayKey(t);
+      const weekKey = `Week of ${localWeekStartKey(t)}`;
+      const categoryKey = (r?.category || "").trim() || "Other";
+
+      bumpCountOnly(byDay, dayKey);
+      bumpCountOnly(byWeek, weekKey);
+      bumpCountOnly(byCategory, categoryKey);
+
+      if (r.priceAmount == null || !r.priceCurrency) continue;
+      pricedTrades += 1;
+
+      bumpBucket(totalByCurrency, r.priceCurrency, r.priceAmount);
+      bumpGroupBucket(byDay, dayKey, r.priceCurrency, r.priceAmount);
+      bumpGroupBucket(byWeek, weekKey, r.priceCurrency, r.priceAmount);
+      bumpGroupBucket(byCategory, categoryKey, r.priceCurrency, r.priceAmount);
+    }
+
+    const byDayRows = toStatRows(byDay, { sort: "keyDesc", limit: 14 });
+    const byWeekRows = toStatRows(byWeek, { sort: "keyDesc", limit: 12 });
+    const byCategoryRows = toStatRows(byCategory, { preferredCurrency: preferred, limit: 12 });
+
+    const bestWorst = computeBestWorstDay(byDay, preferred);
+
+    return {
+      preferredCurrency: preferred,
+      trades: rows.length,
+      pricedTrades,
+      totalText: formatCurrencyMap(totalByCurrency),
+      bestWorstHtml: bestWorst.html,
+      byDay: byDayRows,
+      byWeek: byWeekRows,
+      byCategory: byCategoryRows,
+    };
+  }
+
+  function bumpCountOnly(groupMap, key) {
+    let g = groupMap.get(key);
+    if (!g) {
+      g = { count: 0, byCurrency: new Map() };
+      groupMap.set(key, g);
+    }
+    g.count += 1;
+  }
+
+  function bumpGroupBucket(groupMap, key, currency, amount) {
+    const g = groupMap.get(key);
+    if (!g) return;
+    bumpBucket(g.byCurrency, currency, amount);
+  }
+
+  function bumpBucket(currencyMap, currency, amount) {
+    const k = normalizeCurrency(currency);
+    if (!k) return;
+    const prev = currencyMap.get(k) || 0;
+    currencyMap.set(k, prev + amount);
+  }
+
+  function toStatRows(groupMap, { sort = "preferredThenCount", preferredCurrency = "chaos", limit = 999 } = {}) {
+    const rows = [];
+    for (const [label, g] of groupMap.entries()) {
+      rows.push({
+        label,
+        count: g.count,
+        preferredAmount: g.byCurrency.get(preferredCurrency) || 0,
+        incomeText: formatCurrencyMap(g.byCurrency),
+      });
+    }
+
+    if (sort === "keyDesc") {
+      rows.sort((a, b) => String(b.label).localeCompare(String(a.label)));
+    } else {
+      rows.sort((a, b) => {
+        if (b.preferredAmount !== a.preferredAmount) return b.preferredAmount - a.preferredAmount;
+        if (b.count !== a.count) return b.count - a.count;
+        return String(a.label).localeCompare(String(b.label));
+      });
+    }
+
+    return rows.slice(0, limit);
+  }
+
+  function computeBestWorstDay(byDay, preferredCurrency) {
+    let best = null;
+    let worst = null;
+
+    for (const [dayKey, g] of byDay.entries()) {
+      const pref = g.byCurrency.get(preferredCurrency) || 0;
+      const row = {
+        dayKey,
+        count: g.count,
+        preferredAmount: pref,
+        incomeText: formatCurrencyMap(g.byCurrency),
+      };
+      if (!best || row.preferredAmount > best.preferredAmount) best = row;
+      if (!worst || row.preferredAmount < worst.preferredAmount) worst = row;
+    }
+
+    const bestText = best ? `${best.dayKey}: ${formatAmount(best.preferredAmount)} ${preferredCurrency} • ${best.count} trades • ${best.incomeText || "—"}` : "—";
+    const worstText = worst ? `${worst.dayKey}: ${formatAmount(worst.preferredAmount)} ${preferredCurrency} • ${worst.count} trades • ${worst.incomeText || "—"}` : "—";
+
+    const html = [
+      `<div><span class="pth-muted">Best:</span> ${escapeHtml(bestText)}</div>`,
+      `<div><span class="pth-muted">Worst:</span> ${escapeHtml(worstText)}</div>`,
+      `<div class="pth-muted" style="margin-top:6px">Tip: change “Best/worst in” to another currency to compare days differently.</div>`,
+    ].join("");
+
+    return { best, worst, html };
+  }
+
+  function localDayKey(ms) {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+
+  function localWeekStartKey(ms) {
+    const d = new Date(ms);
+    d.setHours(0, 0, 0, 0);
+    const dow = d.getDay(); // 0..6 (Sun..Sat)
+    const daysSinceMonday = (dow + 6) % 7;
+    d.setDate(d.getDate() - daysSinceMonday);
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function formatCurrencyMap(currencyMap) {
+    const entries = Array.from(currencyMap.entries()).filter(([, v]) => Number.isFinite(v) && v !== 0);
+    if (!entries.length) return "";
+    entries.sort((a, b) => b[1] - a[1]);
+    return entries.map(([c, v]) => `${formatAmount(v)} ${c}`).join(" + ");
+  }
+
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function el(tag, props = {}, children = null) {
+    const node = document.createElement(tag);
+    if (props.class) node.className = props.class;
+    if (props.text != null) node.textContent = props.text;
+    if (props.html != null) node.innerHTML = props.html;
+    if (props.type) node.setAttribute("type", props.type);
+    if (props.placeholder) node.setAttribute("placeholder", props.placeholder);
+    if (props.min != null) node.setAttribute("min", String(props.min));
+    if (props.max != null) node.setAttribute("max", String(props.max));
+    if (props.value != null) node.value = String(props.value);
+    if (props.src) node.setAttribute("src", props.src);
+    if (props.alt != null) node.setAttribute("alt", props.alt);
+    if (props.attr) {
+      for (const [k, v] of Object.entries(props.attr)) node.setAttribute(k, String(v));
+    }
+    if (Array.isArray(children)) {
+      for (const c of children) node.appendChild(c);
+    }
+    return node;
+  }
+})();

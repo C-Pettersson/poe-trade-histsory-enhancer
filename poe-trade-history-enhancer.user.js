@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade History Enhancer
 // @namespace    https://github.com/claespettersson/poe-trade-history-enhancer
-// @version      0.2.4
+// @version      0.2.5
 // @description  Enhances https://www.pathofexile.com/trade/history with a sortable/filterable table, "new" highlighting, and copy-item-text.
 // @author       You
 // @match        https://www.pathofexile.com/trade/history*
@@ -41,6 +41,7 @@
 
   const STORAGE_KEY = "pthEnhancer.settings.v1";
   const STORAGE_SEEN_KEY = "pthEnhancer.seenItemIds.v1";
+  const STORAGE_ARCHIVE_PREFIX = "pthEnhancer.tradeArchive.v1.";
 
   /** @type {{onlyNew: boolean, hideOriginal: boolean, preferredCurrency: string, divineChaosPrice: (number|null)}} */
   const settings = loadSettings();
@@ -48,7 +49,7 @@
   /** @type {Set<string>} */
   const seenItemIds = loadSeenSet();
 
-  /** @type {null | { league: string, result: any[] }} */
+  /** @type {null | { league: string, rows: Array<ReturnType<typeof normalizeRow>>, gapInfo: ReturnType<typeof detectGap> }} */
   let lastPayload = null;
 
   const ui = createUi();
@@ -73,8 +74,8 @@
     });
     ui.onMarkAllSeen(() => {
       if (!lastPayload) return;
-      for (const row of lastPayload.result) {
-        const id = row?.item_id;
+      for (const row of lastPayload.rows) {
+        const id = row?.itemId;
         if (typeof id === "string" && id) seenItemIds.add(id);
       }
       persistSeenSet(seenItemIds);
@@ -108,40 +109,32 @@
       return;
     }
 
-    lastPayload = { league, result: payload.result };
+    const persisted = persistHistoryBatch(league, payload.result);
+    lastPayload = { league, rows: persisted.rows, gapInfo: persisted.gapInfo };
     renderFromPayload(lastPayload);
   }
 
   function renderFromPayload(payload) {
-    const { league, result } = payload;
-
-    // Sort by time desc (ISO-8601, safe to Date parse).
-    const rows = [...result].sort((a, b) => {
-      const ta = Date.parse(a?.time ?? 0);
-      const tb = Date.parse(b?.time ?? 0);
-      return tb - ta;
-    });
+    const { league, rows, gapInfo } = payload;
 
     const now = Date.now();
     let newCount = 0;
 
-    /** @type {Array<ReturnType<typeof normalizeRow>>} */
     const normalized = [];
     for (const row of rows) {
-      const n = normalizeRow(row);
-      if (!n) continue;
       // Trade history is sold items only; require a concrete price.
-      if (n.priceAmount == null || !n.priceCurrency) continue;
-      const isNew = !seenItemIds.has(n.itemId);
+      if (row.priceAmount == null || !row.priceCurrency) continue;
+      const isNew = !seenItemIds.has(row.itemId);
       if (isNew) newCount += 1;
       if (settings.onlyNew && !isNew) continue;
-      normalized.push(n);
+      normalized.push(row);
     }
 
     ui.setHeader({
       league,
       count: normalized.length,
       newCount,
+      archivedCount: rows.length,
       lastUpdated: now,
     });
 
@@ -165,7 +158,10 @@
       },
     });
 
-    ui.setStatus("Ready");
+    const gapLabel = gapInfo?.detected
+      ? ` • gap detected (${gapInfo.fromTimeLocal} -> ${gapInfo.toTimeLocal})`
+      : "";
+    ui.setStatus(`Ready • archived ${rows.length}${gapLabel}`);
   }
 
   function applyHideOriginal() {
@@ -495,6 +491,141 @@
     localStorage.setItem(STORAGE_SEEN_KEY, JSON.stringify(bounded));
   }
 
+  function leagueStorageKey(league) {
+    return `${STORAGE_ARCHIVE_PREFIX}${encodeURIComponent(String(league || "").trim().toLowerCase())}`;
+  }
+
+  function makeTradeKey(league, normalizedRow) {
+    const norm = normalizedRow;
+    if (!norm || norm.priceAmount == null || !norm.priceCurrency) return null;
+    return `${encodeURIComponent(String(league || "").trim().toLowerCase())}|${norm.itemId}|${norm.timeIso}|${norm.priceAmount}|${norm.priceCurrency}`;
+  }
+
+  function normalizeAndKeyBatch(league, rawRows) {
+    const rows = [];
+    const keySet = new Set();
+
+    for (const row of rawRows) {
+      const norm = normalizeRow(row);
+      if (!norm) continue;
+      if (norm.priceAmount == null || !norm.priceCurrency) continue;
+      const tradeKey = makeTradeKey(league, norm);
+      if (!tradeKey || keySet.has(tradeKey)) continue;
+      keySet.add(tradeKey);
+      rows.push({ ...norm, tradeKey });
+    }
+
+    rows.sort((a, b) => b.timeMs - a.timeMs);
+    return { rows, keySet };
+  }
+
+  function readArchive(league) {
+    try {
+      const raw = localStorage.getItem(leagueStorageKey(league));
+      if (!raw) return { rows: [], meta: {} };
+      const parsed = JSON.parse(raw);
+      const rows = Array.isArray(parsed?.rows) ? parsed.rows : [];
+      const meta = parsed && typeof parsed.meta === "object" && parsed.meta ? parsed.meta : {};
+      return { rows: sanitizeArchiveRows(rows), meta };
+    } catch {
+      return { rows: [], meta: {} };
+    }
+  }
+
+  function sanitizeArchiveRows(rows) {
+    const out = [];
+    const keys = new Set();
+
+    for (const r of rows) {
+      if (!r || typeof r !== "object") continue;
+      if (typeof r.tradeKey !== "string" || !r.tradeKey) continue;
+      if (keys.has(r.tradeKey)) continue;
+      if (typeof r.itemId !== "string" || !r.itemId) continue;
+      if (typeof r.timeIso !== "string" || !r.timeIso) continue;
+      if (!Number.isFinite(r.timeMs)) continue;
+      if (typeof r.priceCurrency !== "string" || !r.priceCurrency) continue;
+      if (typeof r.priceAmount !== "number" || !Number.isFinite(r.priceAmount)) continue;
+      keys.add(r.tradeKey);
+      out.push(r);
+    }
+
+    out.sort((a, b) => b.timeMs - a.timeMs);
+    return out;
+  }
+
+  function detectGap(lastMeta, currentRows, currentKeySet) {
+    const prevNewestMs = Number.isFinite(lastMeta?.lastFetchNewestMs) ? lastMeta.lastFetchNewestMs : null;
+    const prevKeys = Array.isArray(lastMeta?.lastFetchKeys)
+      ? new Set(lastMeta.lastFetchKeys.filter((x) => typeof x === "string"))
+      : new Set();
+
+    if (!currentRows.length || !Number.isFinite(prevNewestMs)) {
+      return { detected: false, fromTimeLocal: "", toTimeLocal: "" };
+    }
+
+    const currentOldestMs = currentRows[currentRows.length - 1].timeMs;
+    if (!Number.isFinite(currentOldestMs) || currentOldestMs <= prevNewestMs) {
+      return { detected: false, fromTimeLocal: "", toTimeLocal: "" };
+    }
+
+    const hasKeyOverlap = prevKeys.size
+      ? Array.from(currentKeySet).some((k) => prevKeys.has(k))
+      : false;
+    if (hasKeyOverlap) return { detected: false, fromTimeLocal: "", toTimeLocal: "" };
+
+    return {
+      detected: true,
+      fromTimeLocal: new Date(prevNewestMs).toLocaleString(),
+      toTimeLocal: new Date(currentOldestMs).toLocaleString(),
+    };
+  }
+
+  function persistHistoryBatch(league, rawRows) {
+    const current = normalizeAndKeyBatch(league, rawRows);
+    const archive = readArchive(league);
+    const gapInfo = detectGap(archive.meta, current.rows, current.keySet);
+
+    /** @type {Map<string, any>} */
+    const merged = new Map();
+    for (const r of archive.rows) merged.set(r.tradeKey, r);
+    for (const r of current.rows) merged.set(r.tradeKey, r);
+
+    const mergedRows = Array.from(merged.values()).sort((a, b) => b.timeMs - a.timeMs);
+    const newestMs = current.rows.length ? current.rows[0].timeMs : null;
+    const oldestMs = current.rows.length ? current.rows[current.rows.length - 1].timeMs : null;
+
+    const nextMeta = {
+      lastFetchAtMs: Date.now(),
+      lastFetchNewestMs: newestMs,
+      lastFetchOldestMs: oldestMs,
+      lastFetchKeys: Array.from(current.keySet),
+      gapCount: (Number.isFinite(archive.meta?.gapCount) ? archive.meta.gapCount : 0) + (gapInfo.detected ? 1 : 0),
+      lastGapAtMs: gapInfo.detected ? Date.now() : archive.meta?.lastGapAtMs ?? null,
+      lastGapFromMs: gapInfo.detected ? newestMs : archive.meta?.lastGapFromMs ?? null,
+      lastGapToMs: gapInfo.detected ? oldestMs : archive.meta?.lastGapToMs ?? null,
+    };
+
+    writeArchive(league, mergedRows, nextMeta);
+    return { rows: mergedRows, gapInfo };
+  }
+
+  function writeArchive(league, rows, meta) {
+    const key = leagueStorageKey(league);
+    let payloadRows = Array.isArray(rows) ? rows.slice() : [];
+
+    while (payloadRows.length >= 0) {
+      try {
+        const payload = { rows: payloadRows, meta };
+        localStorage.setItem(key, JSON.stringify(payload));
+        return;
+      } catch {
+        if (payloadRows.length === 0) return;
+        const nextLength = Math.floor(payloadRows.length * 0.9);
+        payloadRows = payloadRows.slice(0, Math.max(0, nextLength));
+      }
+    }
+  }
+
   function createUi() {
     GM_addStyle(`
       .pth-root{position:sticky;top:0;left:0;right:0;z-index:9999;display:block !important;float:none !important;clear:both !important;width:100% !important;min-width:100% !important;max-width:none !important;flex:none !important;background:#0b0f14;border-bottom:1px solid #1d2a36;color:#e6eef7;font:12px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
@@ -620,10 +751,11 @@
 
     return {
       root,
-      setHeader({ league, count, newCount, lastUpdated }) {
+      setHeader({ league, count, newCount, archivedCount, lastUpdated }) {
         const dt = new Date(lastUpdated).toLocaleTimeString();
         const newPart = newCount ? ` • ${newCount} new` : "";
-        header.textContent = `League: ${league} • Showing: ${count}${newPart} • Updated: ${dt}`;
+        const archivePart = Number.isFinite(archivedCount) ? ` • Archived: ${archivedCount}` : "";
+        header.textContent = `League: ${league} • Showing: ${count}${newPart}${archivePart} • Updated: ${dt}`;
       },
       setStatus(text) {
         status.textContent = text;

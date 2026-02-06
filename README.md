@@ -7,6 +7,7 @@ Userscript that enhances the official Path of Exile trade history page (`https:/
 - Replaces the default list with a cleaner table (newest-first)
 - Filter box (filters across item name/type, price, note, and mods)
 - Highlights new entries since you last marked them as seen
+- Persists sold history per league in `localStorage` (merges each 100-row API snapshot into a long-term local archive)
 - One-click **Copy item text** (copies the in-game item text to your clipboard)
 - Basic income stats:
   - Totals per currency
@@ -29,6 +30,8 @@ Userscript that enhances the official Path of Exile trade history page (`https:/
 ## Usage
 
 - **Refresh**: fetches the latest history for the currently selected league.
+- The UI now shows both visible rows and total **Archived** rows for the selected league.
+- If snapshots stop overlapping (likely more than 100 sales happened between refreshes), a **gap detected** warning is shown in status.
 - **Only new**: shows only entries you haven’t marked as seen yet.
 - **Mark seen / Mark all seen**: updates the seen-state used for “new” highlighting.
 - **Best/worst in**: selects which currency to compare days by. If you set **1 div = … chaos**, chaos/divine values are converted for stats (only when a bucket contains chaos/divine only).
@@ -36,7 +39,7 @@ Userscript that enhances the official Path of Exile trade history page (`https:/
 
 ## Data & privacy
 
-- Stores settings and “seen” item IDs in `localStorage` in your browser.
+- Stores settings, “seen” item IDs, and per-league archived sold history in `localStorage` in your browser.
 - Does not use any external services; it reads the same trade history data the page already loads.
 
 ## Development

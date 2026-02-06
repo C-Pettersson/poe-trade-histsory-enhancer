@@ -6,7 +6,7 @@ const path = require("node:path");
 const enhancer = require("../poe-trade-history-enhancer.user.js");
 
 function loadFixture() {
-  const p = path.join(__dirname, "..", "raw-response.json");
+  const p = path.join(__dirname, "..", "local-fixtures", "raw-response.json");
   return JSON.parse(fs.readFileSync(p, "utf8"));
 }
 
@@ -44,7 +44,7 @@ test("normalizeRow produces stable core fields", () => {
   }
 });
 
-test("computeIncomeStats totals match raw-response.json", () => {
+test("computeIncomeStats totals match local fixture", () => {
   const payload = loadFixture();
   const normalized = payload.result
     .map(enhancer.normalizeRow)

@@ -9,7 +9,7 @@ const enhancer = require("../poe-trade-history-enhancer.user.js");
 
 const ROOT = path.join(__dirname, "..");
 const DEV_DIR = path.join(ROOT, "dev");
-const FIXTURE_PATH = path.join(ROOT, "raw-response.json");
+const FIXTURE_PATH = path.join(ROOT, "local-fixtures", "raw-response.json");
 
 function readText(p) {
   return fs.readFileSync(p, "utf8");

@@ -51,13 +51,13 @@ There’s no build step — it’s a single userscript file.
 
 ### Local tests
 
-This repo includes a captured API response (`raw-response.json`) so you can test core parsing/stats logic without hitting the live PoE API.
+For local testing, put a captured API response at `local-fixtures/raw-response.json` so you can test core parsing/stats logic without hitting the live PoE API.
 
 - Run: `npm test`
 
 ### Browse the fixture locally
 
-If you want to browse `raw-response.json` in a local table/stats UI:
+If you want to browse the local fixture in a local table/stats UI:
 
 - Run: `npm run browse`
 - Open: `http://localhost:3000`
@@ -68,4 +68,4 @@ This is an **unofficial** fan project and is not affiliated with Grinding Gear G
 
 ## License
 
-No license file is included yet. If you want others to reuse/modify the code, add a `LICENSE` file (for example MIT).
+GPL-3.0-only. See `LICENSE`.

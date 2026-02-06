@@ -497,9 +497,10 @@
 
   function createUi() {
     GM_addStyle(`
-      .pth-root{position:sticky;top:0;z-index:9999;background:#0b0f14;border-bottom:1px solid #1d2a36;color:#e6eef7;font:12px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
-      .pth-wrap{max-width:1400px;margin:0 auto;padding:10px 12px}
-      .pth-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+      .pth-root{position:sticky;top:0;left:0;right:0;z-index:9999;display:block !important;float:none !important;clear:both !important;width:100% !important;min-width:100% !important;max-width:none !important;flex:none !important;background:#0b0f14;border-bottom:1px solid #1d2a36;color:#e6eef7;font:12px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+      .pth-root *{box-sizing:border-box}
+      .pth-wrap{display:block;width:100%;max-width:1400px;margin:0 auto;padding:10px 12px}
+      .pth-row{display:flex !important;gap:10px;align-items:center;flex-wrap:wrap}
       .pth-title{font-size:13px;font-weight:600;margin-right:auto}
       .pth-muted{opacity:.75}
       .pth-btn{background:#16212b;color:#e6eef7;border:1px solid #223444;border-radius:6px;padding:6px 8px;cursor:pointer}

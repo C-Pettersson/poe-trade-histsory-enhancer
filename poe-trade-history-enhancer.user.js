@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade History Enhancer
 // @namespace    https://github.com/claespettersson/poe-trade-history-enhancer
-// @version      0.2.1
+// @version      0.2.4
 // @description  Enhances https://www.pathofexile.com/trade/history with a sortable/filterable table, "new" highlighting, and copy-item-text.
 // @author       You
 // @match        https://www.pathofexile.com/trade/history*
@@ -13,10 +13,36 @@
 (function () {
   "use strict";
 
+  const IS_NODE =
+    typeof module === "object" &&
+    typeof module?.exports === "object" &&
+    (typeof window === "undefined" || typeof document === "undefined");
+
+  // Allow `require("./poe-trade-history-enhancer.user.js")` in Node for local tests.
+  // In Node we export the pure/data functions and skip all DOM + GM_* integration.
+  if (IS_NODE) {
+    module.exports = {
+      normalizeRow,
+      computeIncomeStats,
+      rarityLabel,
+      itemCategoryLabel,
+      humanizeCategoryToken,
+      normalizeCurrency,
+      formatAmount,
+      decodeItemText,
+      formatLocalTime,
+      formatTimeAgo,
+      localDayKey,
+      localWeekStartKey,
+      formatCurrencyMap,
+    };
+    return;
+  }
+
   const STORAGE_KEY = "pthEnhancer.settings.v1";
   const STORAGE_SEEN_KEY = "pthEnhancer.seenItemIds.v1";
 
-  /** @type {{onlyNew: boolean, hideOriginal: boolean, preferredCurrency: string}} */
+  /** @type {{onlyNew: boolean, hideOriginal: boolean, preferredCurrency: string, divineChaosPrice: (number|null)}} */
   const settings = loadSettings();
 
   /** @type {Set<string>} */
@@ -104,6 +130,8 @@
     for (const row of rows) {
       const n = normalizeRow(row);
       if (!n) continue;
+      // Trade history is sold items only; require a concrete price.
+      if (n.priceAmount == null || !n.priceCurrency) continue;
       const isNew = !seenItemIds.has(n.itemId);
       if (isNew) newCount += 1;
       if (settings.onlyNew && !isNew) continue;
@@ -117,7 +145,12 @@
       lastUpdated: now,
     });
 
-    ui.renderStats(computeIncomeStats(normalized, { preferredCurrency: settings.preferredCurrency }));
+    ui.renderStats(
+      computeIncomeStats(normalized, {
+        preferredCurrency: settings.preferredCurrency,
+        divineChaosPrice: settings.divineChaosPrice,
+      }),
+    );
 
     ui.renderTable(normalized, {
       isNew: (itemId) => !seenItemIds.has(itemId),
@@ -261,7 +294,11 @@
 
     const typeLine = (item?.typeLine || "").trim();
     const baseType = (item?.baseType || "").trim();
-    const category = categoryLabel(item?.frameType);
+    const extendedTextB64 = item?.extended?.text;
+    const itemText = typeof extendedTextB64 === "string" ? decodeItemText(extendedTextB64) : null;
+
+    const rarity = rarityLabel(item?.frameType);
+    const category = itemCategoryLabel(item, itemText);
     const ilvl = typeof item?.ilvl === "number" ? item.ilvl : null;
 
     const rawPriceAmount = row?.price?.amount;
@@ -279,9 +316,6 @@
       ...(Array.isArray(item?.enchantMods) ? item.enchantMods : []),
     ].filter((m) => typeof m === "string" && m.trim().length > 0);
 
-    const extendedTextB64 = item?.extended?.text;
-    const itemText = typeof extendedTextB64 === "string" ? decodeItemText(extendedTextB64) : null;
-
     return {
       itemId,
       timeIso,
@@ -290,6 +324,7 @@
       timeAgo: formatTimeAgo(timeIso),
       name: typeLine || baseType || "(unknown)",
       baseType: baseType || "",
+      rarity,
       category,
       ilvl,
       priceText,
@@ -302,7 +337,7 @@
     };
   }
 
-  function categoryLabel(frameType) {
+  function rarityLabel(frameType) {
     // https://www.poewiki.net/wiki/Item_class#Frame_types (rough mapping, but fine for labeling)
     switch (frameType) {
       case 0:
@@ -326,6 +361,41 @@
     }
   }
 
+  function itemCategoryLabel(item, itemText) {
+    const direct = item?.extended?.category;
+    if (typeof direct === "string" && direct.trim()) return humanizeCategoryToken(direct);
+
+    const cat = item?.category;
+    if (cat && typeof cat === "object") {
+      for (const [k, v] of Object.entries(cat)) {
+        if (!k) continue;
+        if (Array.isArray(v) && v.length) {
+          const sub = typeof v[0] === "string" ? v[0] : "";
+          return sub ? `${humanizeCategoryToken(k)}: ${humanizeCategoryToken(sub)}` : humanizeCategoryToken(k);
+        }
+        return humanizeCategoryToken(k);
+      }
+    }
+
+    if (typeof itemText === "string" && itemText) {
+      const m = itemText.match(/^Item Class:\s*(.+)\s*$/m);
+      if (m && m[1]) return m[1].trim();
+    }
+
+    return "";
+  }
+
+  function humanizeCategoryToken(token) {
+    return String(token || "")
+      .trim()
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .split(" ")
+      .filter(Boolean)
+      .map((w) => w.slice(0, 1).toUpperCase() + w.slice(1))
+      .join(" ");
+  }
+
   function normalizeCurrency(currency) {
     return String(currency || "")
       .trim()
@@ -341,7 +411,8 @@
   function decodeItemText(b64) {
     try {
       // PoE uses base64 of the in-game copy text.
-      const decoded = atob(b64);
+      const decoded =
+        typeof atob === "function" ? atob(b64) : Buffer.from(String(b64), "base64").toString("utf8");
       // Normalize newlines for clipboard.
       return decoded.replace(/\r\n/g, "\n");
     } catch {
@@ -390,6 +461,7 @@
         onlyNew: !!parsed.onlyNew,
         hideOriginal: !!parsed.hideOriginal,
         preferredCurrency: typeof parsed.preferredCurrency === "string" ? normalizeCurrency(parsed.preferredCurrency) || "chaos" : "chaos",
+        divineChaosPrice: toPositiveNumberOrNull(parsed.divineChaosPrice),
       };
     } catch {
       return defaultSettings();
@@ -397,7 +469,7 @@
   }
 
   function defaultSettings() {
-    return { onlyNew: false, hideOriginal: false, preferredCurrency: "chaos" };
+    return { onlyNew: false, hideOriginal: false, preferredCurrency: "chaos", divineChaosPrice: null };
   }
 
   function saveSettings(next) {
@@ -477,6 +549,14 @@
       preferredCurrencyInput,
     ]);
 
+    const divineChaosPriceInput = el("input", { class: "pth-input", value: "", placeholder: "153" });
+    divineChaosPriceInput.style.width = "70px";
+    const divineChaosPriceLabel = el("label", { class: "pth-badge" }, [
+      el("span", { text: " 1 div = " }),
+      divineChaosPriceInput,
+      el("span", { text: " chaos" }),
+    ]);
+
     const filterInput = el("input", { class: "pth-input", placeholder: "Filter (name/mod/note)…" });
     filterInput.style.flex = "1 1 260px";
 
@@ -488,6 +568,7 @@
       onlyNewLabel,
       hideOriginalLabel,
       preferredCurrencyLabel,
+      divineChaosPriceLabel,
     ]);
 
     const secondRow = el("div", { class: "pth-row" }, [filterInput, status]);
@@ -521,6 +602,11 @@
     preferredCurrencyInput.addEventListener("change", () => {
       onSettingsChange?.({ preferredCurrency: normalizeCurrency(preferredCurrencyInput.value) || "chaos" });
     });
+    divineChaosPriceInput.addEventListener("change", () => {
+      const v = toPositiveNumberOrNull(divineChaosPriceInput.value);
+      divineChaosPriceInput.value = v == null ? "" : String(v);
+      onSettingsChange?.({ divineChaosPrice: v });
+    });
 
     filterInput.addEventListener("input", () => {
       const q = (filterInput.value || "").trim().toLowerCase();
@@ -545,6 +631,7 @@
         onlyNewToggle.checked = !!next.onlyNew;
         hideOriginalToggle.checked = !!next.hideOriginal;
         preferredCurrencyInput.value = next.preferredCurrency || "chaos";
+        divineChaosPriceInput.value = next.divineChaosPrice == null ? "" : String(next.divineChaosPrice);
       },
       onSettingsChange(fn) {
         onSettingsChange = fn;
@@ -563,26 +650,35 @@
       /**
        * @param {ReturnType<typeof computeIncomeStats>} stats
        */
-      renderStats(stats) {
-        statsWrap.innerHTML = "";
+        renderStats(stats) {
+          statsWrap.innerHTML = "";
 
         const totalsCard = el("div", { class: "pth-card" });
         totalsCard.appendChild(el("div", { class: "pth-card-title", text: "Income totals" }));
         totalsCard.appendChild(
-          el("div", { class: "pth-muted", text: `${stats.trades} trades • ${stats.pricedTrades} priced` }),
+          el("div", { class: "pth-muted", text: `${stats.trades} sold` }),
         );
-        totalsCard.appendChild(el("div", { text: stats.totalText || "—" }));
+        if (stats.totalPreferredText) {
+          totalsCard.appendChild(el("div", { text: stats.totalPreferredText }));
+          if (stats.totalText) totalsCard.appendChild(el("div", { class: "pth-muted", text: stats.totalText }));
+        } else {
+          totalsCard.appendChild(el("div", { text: stats.totalText || "—" }));
+        }
         statsWrap.appendChild(totalsCard);
 
         const bestWorstCard = el("div", { class: "pth-card" });
         bestWorstCard.appendChild(el("div", { class: "pth-card-title", text: `Best / worst day (${stats.preferredCurrency})` }));
         bestWorstCard.appendChild(el("div", { html: stats.bestWorstHtml }));
-        statsWrap.appendChild(bestWorstCard);
+          statsWrap.appendChild(bestWorstCard);
 
-        statsWrap.appendChild(renderStatsTableCard("Income per category", ["Category", "Trades", "Income"], stats.byCategory));
-        statsWrap.appendChild(renderStatsTableCard("Income per day", ["Day", "Trades", "Income"], stats.byDay));
-        statsWrap.appendChild(renderStatsTableCard("Income per week", ["Week", "Trades", "Income"], stats.byWeek));
-      },
+          statsWrap.appendChild(
+            renderStatsTableCard("Income per item category", ["Category", "Sold", "Income"], stats.byCategory),
+          );
+          statsWrap.appendChild(renderStatsTableCard("Income per base type", ["Base type", "Sold", "Income"], stats.byBaseType));
+          statsWrap.appendChild(renderStatsTableCard("Income per rarity", ["Rarity", "Sold", "Income"], stats.byRarity));
+          statsWrap.appendChild(renderStatsTableCard("Income per day", ["Day", "Sold", "Income"], stats.byDay));
+          statsWrap.appendChild(renderStatsTableCard("Income per week", ["Week", "Sold", "Income"], stats.byWeek));
+        },
       /**
        * @param {Array<any>} rows
        * @param {{isNew: (itemId: string) => boolean, onCopyItemText: (text: string) => void, onMarkSeen: (itemId: string) => void}} handlers
@@ -608,9 +704,9 @@
           ]),
         );
 
-        for (const r of rows) {
-          const isNew = handlers.isNew(r.itemId);
-          const hay = [r.name, r.baseType, r.category, r.note, r.priceText, ...(r.mods || [])].join(" • ");
+          for (const r of rows) {
+            const isNew = handlers.isNew(r.itemId);
+            const hay = [r.name, r.baseType, r.rarity, r.category, r.note, r.priceText, ...(r.mods || [])].join(" • ");
 
           const tr = el("tr", { class: isNew ? "pth-new" : "", attr: { "data-hay": hay } });
 
@@ -621,13 +717,13 @@
 
           const itemCell = el("td");
           const itemRow = el("div", { class: "pth-row" });
-          if (r.icon) itemRow.appendChild(el("img", { class: "pth-icon", src: r.icon, alt: "" }));
-          const itemText = el("div");
-          itemText.appendChild(el("div", { text: r.name }));
-          const sub = [r.category, r.baseType].filter(Boolean).join(" • ");
-          if (sub) itemText.appendChild(el("div", { class: "pth-muted", text: sub }));
-          itemRow.appendChild(itemText);
-          itemCell.appendChild(itemRow);
+            if (r.icon) itemRow.appendChild(el("img", { class: "pth-icon", src: r.icon, alt: "" }));
+            const itemText = el("div");
+            itemText.appendChild(el("div", { text: r.name }));
+            const sub = [r.rarity, r.category, r.baseType].filter(Boolean).join(" • ");
+            if (sub) itemText.appendChild(el("div", { class: "pth-muted", text: sub }));
+            itemRow.appendChild(itemText);
+            itemCell.appendChild(itemRow);
 
           const ilvlCell = el("td", { text: r.ilvl != null ? String(r.ilvl) : "" });
           const priceCell = el("td", { text: r.priceText || "" });
@@ -682,7 +778,8 @@
     thead.appendChild(el("tr", {}, headerCells.map((h) => el("th", { text: h }))));
 
     for (const r of rows) {
-      tbody.appendChild(el("tr", {}, [el("td", { text: r.label }), el("td", { text: String(r.count) }), el("td", { text: r.incomeText || "—" })]));
+      const countText = r.countText != null ? String(r.countText) : String(r.count);
+      tbody.appendChild(el("tr", {}, [el("td", { text: r.label }), el("td", { text: countText }), el("td", { text: r.incomeText || "—" })]));
     }
 
     if (!rows.length) tbody.appendChild(el("tr", {}, [el("td", { class: "pth-muted", text: "No data", attr: { colspan: "3" } })]));
@@ -691,58 +788,106 @@
     return card;
   }
 
-  function computeIncomeStats(rows, { preferredCurrency }) {
-    const preferred = normalizeCurrency(preferredCurrency) || "chaos";
+    function computeIncomeStats(rows, { preferredCurrency, divineChaosPrice } = {}) {
+      const preferred = normalizeCurrency(preferredCurrency) || "chaos";
+      const divineChaos = toPositiveNumberOrNull(divineChaosPrice);
 
-    /** @type {Map<string, number>} */
-    const totalByCurrency = new Map();
-    /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
-    const byCategory = new Map();
-    /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
-    const byDay = new Map();
-    /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
-    const byWeek = new Map();
+      /** @type {Map<string, number>} */
+      const totalByCurrency = new Map();
+      /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
+      const byCategory = new Map();
+      /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
+      const byBaseType = new Map();
+      /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
+      const byRarity = new Map();
+      /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
+      const byDay = new Map();
+      /** @type {Map<string, {count: number, byCurrency: Map<string, number>}>} */
+      const byWeek = new Map();
 
-    let pricedTrades = 0;
+      const soldRows = Array.isArray(rows)
+        ? rows.filter((r) => {
+            const t = r?.timeMs;
+            if (!Number.isFinite(t)) return false;
+            const amountOk = typeof r?.priceAmount === "number" && Number.isFinite(r.priceAmount);
+            const currencyOk = !!normalizeCurrency(r?.priceCurrency || "");
+            return amountOk && currencyOk;
+          })
+        : [];
 
-    for (const r of rows) {
-      const t = r?.timeMs;
-      if (!Number.isFinite(t)) continue;
+      for (const r of soldRows) {
+        const t = r.timeMs;
 
-      const dayKey = localDayKey(t);
-      const weekKey = `Week of ${localWeekStartKey(t)}`;
-      const categoryKey = (r?.category || "").trim() || "Other";
+        const dayKey = localDayKey(t);
+        const weekKey = `Week of ${localWeekStartKey(t)}`;
+        const categoryKey = (r?.category || "").trim() || "Other";
+        const baseTypeKey = (() => {
+          const k = (r?.baseType || "").trim() || (r?.name || "").trim() || "Other";
+          return k === "(unknown)" ? "Other" : k;
+        })();
+        const rarityKey = (r?.rarity || "").trim() || "Other";
 
-      bumpCountOnly(byDay, dayKey);
-      bumpCountOnly(byWeek, weekKey);
-      bumpCountOnly(byCategory, categoryKey);
+        bumpCountOnly(byDay, dayKey);
+        bumpCountOnly(byWeek, weekKey);
+        bumpCountOnly(byCategory, categoryKey);
+        bumpCountOnly(byBaseType, baseTypeKey);
+        bumpCountOnly(byRarity, rarityKey);
 
-      if (r.priceAmount == null || !r.priceCurrency) continue;
-      pricedTrades += 1;
+        bumpBucket(totalByCurrency, r.priceCurrency, r.priceAmount);
+        bumpGroupBucket(byDay, dayKey, r.priceCurrency, r.priceAmount);
+        bumpGroupBucket(byWeek, weekKey, r.priceCurrency, r.priceAmount);
+        bumpGroupBucket(byCategory, categoryKey, r.priceCurrency, r.priceAmount);
+        bumpGroupBucket(byBaseType, baseTypeKey, r.priceCurrency, r.priceAmount);
+        bumpGroupBucket(byRarity, rarityKey, r.priceCurrency, r.priceAmount);
+      }
 
-      bumpBucket(totalByCurrency, r.priceCurrency, r.priceAmount);
-      bumpGroupBucket(byDay, dayKey, r.priceCurrency, r.priceAmount);
-      bumpGroupBucket(byWeek, weekKey, r.priceCurrency, r.priceAmount);
-      bumpGroupBucket(byCategory, categoryKey, r.priceCurrency, r.priceAmount);
-    }
+      const byDayRows = toStatRows(byDay, {
+        sort: "keyDesc",
+        preferredCurrency: preferred,
+        divineChaosPrice: divineChaos,
+        limit: 14,
+      });
+      const byWeekRows = toStatRows(byWeek, {
+        sort: "keyDesc",
+        preferredCurrency: preferred,
+        divineChaosPrice: divineChaos,
+        limit: 12,
+      });
+      const byCategoryRows = toStatRows(byCategory, {
+        preferredCurrency: preferred,
+        divineChaosPrice: divineChaos,
+        limit: 12,
+      });
+      const byBaseTypeRows = toStatRows(byBaseType, {
+        preferredCurrency: preferred,
+        divineChaosPrice: divineChaos,
+        limit: 12,
+      });
+      const byRarityRows = toStatRows(byRarity, {
+        preferredCurrency: preferred,
+        divineChaosPrice: divineChaos,
+        limit: 12,
+      });
 
-    const byDayRows = toStatRows(byDay, { sort: "keyDesc", limit: 14 });
-    const byWeekRows = toStatRows(byWeek, { sort: "keyDesc", limit: 12 });
-    const byCategoryRows = toStatRows(byCategory, { preferredCurrency: preferred, limit: 12 });
+    const bestWorst = computeBestWorstDay(byDay, preferred, divineChaos);
 
-    const bestWorst = computeBestWorstDay(byDay, preferred);
+    const totalPreferredAmount = tryConvertChaosDivineOnly(totalByCurrency, preferred, divineChaos);
 
     return {
       preferredCurrency: preferred,
-      trades: rows.length,
-      pricedTrades,
+      divineChaosPrice: divineChaos,
+      trades: soldRows.length,
       totalText: formatCurrencyMap(totalByCurrency),
+      totalPreferredText:
+        totalPreferredAmount == null ? null : `${formatAmount(totalPreferredAmount)} ${preferred}`,
       bestWorstHtml: bestWorst.html,
-      byDay: byDayRows,
-      byWeek: byWeekRows,
-      byCategory: byCategoryRows,
-    };
-  }
+        byDay: byDayRows,
+        byWeek: byWeekRows,
+        byCategory: byCategoryRows,
+        byBaseType: byBaseTypeRows,
+        byRarity: byRarityRows,
+      };
+    }
 
   function bumpCountOnly(groupMap, key) {
     let g = groupMap.get(key);
@@ -766,14 +911,20 @@
     currencyMap.set(k, prev + amount);
   }
 
-  function toStatRows(groupMap, { sort = "preferredThenCount", preferredCurrency = "chaos", limit = 999 } = {}) {
+  function toStatRows(
+    groupMap,
+    { sort = "preferredThenCount", preferredCurrency = "chaos", divineChaosPrice = null, limit = 999 } = {},
+  ) {
     const rows = [];
     for (const [label, g] of groupMap.entries()) {
+      const totalCount = typeof g.count === "number" ? g.count : 0;
+
       rows.push({
         label,
-        count: g.count,
-        preferredAmount: g.byCurrency.get(preferredCurrency) || 0,
-        incomeText: formatCurrencyMap(g.byCurrency),
+        count: totalCount,
+        countText: String(totalCount),
+        preferredAmount: preferredAmountForGroup(g.byCurrency, preferredCurrency, divineChaosPrice),
+        incomeText: formatCurrencyMapForPreferred(g.byCurrency, preferredCurrency, divineChaosPrice),
       });
     }
 
@@ -790,29 +941,33 @@
     return rows.slice(0, limit);
   }
 
-  function computeBestWorstDay(byDay, preferredCurrency) {
+  function computeBestWorstDay(byDay, preferredCurrency, divineChaosPrice) {
     let best = null;
     let worst = null;
 
     for (const [dayKey, g] of byDay.entries()) {
-      const pref = g.byCurrency.get(preferredCurrency) || 0;
+      const pref = preferredAmountForGroup(g.byCurrency, preferredCurrency, divineChaosPrice);
       const row = {
         dayKey,
         count: g.count,
         preferredAmount: pref,
-        incomeText: formatCurrencyMap(g.byCurrency),
+        incomeText: formatCurrencyMapForPreferred(g.byCurrency, preferredCurrency, divineChaosPrice),
       };
       if (!best || row.preferredAmount > best.preferredAmount) best = row;
       if (!worst || row.preferredAmount < worst.preferredAmount) worst = row;
     }
 
-    const bestText = best ? `${best.dayKey}: ${formatAmount(best.preferredAmount)} ${preferredCurrency} • ${best.count} trades • ${best.incomeText || "—"}` : "—";
-    const worstText = worst ? `${worst.dayKey}: ${formatAmount(worst.preferredAmount)} ${preferredCurrency} • ${worst.count} trades • ${worst.incomeText || "—"}` : "—";
+    const bestText = best
+      ? `${best.dayKey}: ${formatAmount(best.preferredAmount)} ${preferredCurrency} • ${best.count} sold • ${best.incomeText || "—"}`
+      : "—";
+    const worstText = worst
+      ? `${worst.dayKey}: ${formatAmount(worst.preferredAmount)} ${preferredCurrency} • ${worst.count} sold • ${worst.incomeText || "—"}`
+      : "—";
 
     const html = [
       `<div><span class="pth-muted">Best:</span> ${escapeHtml(bestText)}</div>`,
       `<div><span class="pth-muted">Worst:</span> ${escapeHtml(worstText)}</div>`,
-      `<div class="pth-muted" style="margin-top:6px">Tip: change “Best/worst in” to another currency to compare days differently.</div>`,
+      `<div class="pth-muted" style="margin-top:6px">Tip: set “1 div = … chaos” to enable chaos/divine conversion for these comparisons.</div>`,
     ].join("");
 
     return { best, worst, html };
@@ -841,6 +996,50 @@
     if (!entries.length) return "";
     entries.sort((a, b) => b[1] - a[1]);
     return entries.map(([c, v]) => `${formatAmount(v)} ${c}`).join(" + ");
+  }
+
+  function toPositiveNumberOrNull(value) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+    if (typeof value === "string") {
+      const s = value.trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }
+    return null;
+  }
+
+  function tryConvertChaosDivineOnly(currencyMap, preferredCurrency, divineChaosPrice) {
+    const price = toPositiveNumberOrNull(divineChaosPrice);
+    const preferred = normalizeCurrency(preferredCurrency);
+    if (!price) return null;
+    if (preferred !== "chaos" && preferred !== "divine") return null;
+
+    const entries = Array.from(currencyMap.entries()).filter(([, v]) => Number.isFinite(v) && v !== 0);
+    if (!entries.length) return 0;
+    for (const [k] of entries) {
+      const c = normalizeCurrency(k);
+      if (c !== "chaos" && c !== "divine") return null;
+    }
+
+    const chaos = currencyMap.get("chaos") || 0;
+    const divine = currencyMap.get("divine") || 0;
+    if (preferred === "chaos") return chaos + divine * price;
+    return divine + chaos / price;
+  }
+
+  function preferredAmountForGroup(currencyMap, preferredCurrency, divineChaosPrice) {
+    const preferred = normalizeCurrency(preferredCurrency);
+    const converted = tryConvertChaosDivineOnly(currencyMap, preferred, divineChaosPrice);
+    if (converted != null) return converted;
+    return currencyMap.get(preferred) || 0;
+  }
+
+  function formatCurrencyMapForPreferred(currencyMap, preferredCurrency, divineChaosPrice) {
+    const preferred = normalizeCurrency(preferredCurrency);
+    const converted = tryConvertChaosDivineOnly(currencyMap, preferred, divineChaosPrice);
+    if (converted == null) return formatCurrencyMap(currencyMap);
+    return `${formatAmount(converted)} ${preferred}`;
   }
 
   function escapeHtml(text) {

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>PoE Trade History Enhancer (Local Browser)</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="wrap row">
+        <div class="title">PoE Trade History Enhancer</div>
+        <div class="spacer"></div>
+        <label class="pill">
+          <span class="muted">Preferred:</span>
+          <select id="preferred"></select>
+        </label>
+        <input id="filter" class="input" placeholder="Filter (name/mod/note)…" />
+        <button id="reload" class="btn">Reload</button>
+      </div>
+      <div class="wrap row sub">
+        <div id="status" class="muted">Loading…</div>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section class="stats" id="stats"></section>
+      <section class="card">
+        <div class="cardTitle">Sold items</div>
+        <div class="tableWrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Item</th>
+                <th>iLvl</th>
+                <th>Price</th>
+                <th>Note</th>
+                <th>Mods</th>
+                <th>Item text</th>
+              </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

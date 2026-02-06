@@ -1,0 +1,9 @@
+{
+  "name": "poe-trade-history-enhancer",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test",
+    "browse": "node scripts/browse-server.js"
+  }
+}

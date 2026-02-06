@@ -2,6 +2,10 @@
 
 Userscript that enhances the official Path of Exile trade history page (`https://www.pathofexile.com/trade/history`) with a modern sticky UI: filtering, "new" highlighting, quick copy of item text, and simple income analytics.
 
+## Screenshot
+
+![PoE Trade History Enhancer screenshot](./images/www.pathofexile.com_history_screenshot.png)
+
 ## Features
 
 - Replaces the default list with a cleaner table (newest-first)

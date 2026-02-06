@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         PoE Trade History Enhancer
 // @namespace    https://github.com/claespettersson/poe-trade-history-enhancer
-// @version      0.2.5
+// @version      0.2.6
+// @updateURL    https://raw.githubusercontent.com/claespettersson/poe-trade-history-enhancer/main/poe-trade-history-enhancer.user.js
+// @downloadURL  https://raw.githubusercontent.com/claespettersson/poe-trade-history-enhancer/main/poe-trade-history-enhancer.user.js
 // @description  Enhances https://www.pathofexile.com/trade/history with a sortable/filterable table, "new" highlighting, and copy-item-text.
 // @author       You
 // @match        https://www.pathofexile.com/trade/history*

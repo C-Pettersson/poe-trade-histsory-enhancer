@@ -68,7 +68,7 @@ If you want to browse the local fixture in a local table/stats UI:
 
 ## Disclaimer
 
-This is an **unofficial** fan project and is not affiliated with Grinding Gear Games. The Path of Exile website can change at any time, which may break the script.
+This product isn't affiliated with or endorsed by Grinding Gear Games in any way. The Path of Exile website can change at any time, which may break the script.
 
 ## License
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade History Enhancer
 // @namespace    https://github.com/claespettersson/poe-trade-history-enhancer
-// @version      1.0.0
+// @version      1.1.0
 // @updateURL    https://github.com/C-Pettersson/poe-trade-histsory-enhancer/raw/refs/heads/main/poe-trade-history-enhancer.user.js
 // @downloadURL  https://github.com/C-Pettersson/poe-trade-histsory-enhancer/raw/refs/heads/main/poe-trade-history-enhancer.user.js
 // @description  Enhances https://www.pathofexile.com/trade/history with a sortable/filterable table, "new" highlighting, and copy-item-text.
@@ -306,10 +306,14 @@
     const priceText = priceAmount != null && priceCurrency ? `${formatAmount(priceAmount)} ${priceCurrency}` : "";
 
     const note = typeof item?.note === "string" ? item.note : "";
+    const fracturedMods = (Array.isArray(item?.fracturedMods) ? item.fracturedMods : []).filter(
+      (m) => typeof m === "string" && m.trim().length > 0,
+    );
     const mods = [
       ...(Array.isArray(item?.implicitMods) ? item.implicitMods : []),
       ...(Array.isArray(item?.explicitMods) ? item.explicitMods : []),
       ...(Array.isArray(item?.utilityMods) ? item.utilityMods : []),
+      ...fracturedMods,
       ...(Array.isArray(item?.craftedMods) ? item.craftedMods : []),
       ...(Array.isArray(item?.enchantMods) ? item.enchantMods : []),
     ].filter((m) => typeof m === "string" && m.trim().length > 0);
@@ -329,6 +333,7 @@
       priceAmount,
       priceCurrency,
       note,
+      fracturedMods,
       mods,
       itemText,
       icon: typeof item?.icon === "string" ? item.icon : null,
@@ -354,6 +359,28 @@
         return "Divination";
       case 7:
         return "Quest";
+      default:
+        return "";
+    }
+  }
+
+  function rarityColor(rarity) {
+    const key = String(rarity || "").trim().toLowerCase();
+    switch (key) {
+      case "unique":
+        return "rgb(175, 96, 37)";
+      case "rare":
+        return "rgb(255, 255, 119)";
+      case "magic":
+        return "rgb(136, 136, 255)";
+      case "normal":
+        return "rgb(200, 200, 200)";
+      case "gem":
+        return "rgb(27, 162, 155)";
+      case "currency":
+        return "rgb(170, 158, 130)";
+      case "quest":
+        return "rgb(74, 230, 58)";
       default:
         return "";
     }
@@ -648,6 +675,7 @@
       .pth-icon{width:26px;height:26px;object-fit:contain}
       .pth-mods{max-width:720px}
       .pth-mod{display:inline-block;margin:0 6px 4px 0;padding:2px 6px;border-radius:6px;background:#101a24;border:1px solid #1d2a36}
+      .pth-mod-fractured{color:#a29162;border-color:rgba(162,145,98,.7);background:rgba(162,145,98,.08)}
       .pth-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-top:10px}
       .pth-card{border:1px solid #1d2a36;background:#0f1720;border-radius:10px;padding:8px}
       .pth-card-title{font-weight:600;margin-bottom:6px}
@@ -854,7 +882,10 @@
           const itemRow = el("div", { class: "pth-row" });
             if (r.icon) itemRow.appendChild(el("img", { class: "pth-icon", src: r.icon, alt: "" }));
             const itemText = el("div");
-            itemText.appendChild(el("div", { text: r.name }));
+            const itemName = el("div", { text: r.name });
+            const nameColor = rarityColor(r.rarity);
+            if (nameColor) itemName.style.color = nameColor;
+            itemText.appendChild(itemName);
             const sub = [r.rarity, r.category, r.baseType].filter(Boolean).join(" • ");
             if (sub) itemText.appendChild(el("div", { class: "pth-muted", text: sub }));
             itemRow.appendChild(itemText);
@@ -866,7 +897,11 @@
 
           const modsCell = el("td", { class: "pth-mods" });
           if (Array.isArray(r.mods) && r.mods.length) {
-            for (const m of r.mods.slice(0, 16)) modsCell.appendChild(el("span", { class: "pth-mod", text: m }));
+            const fracturedSet = new Set(Array.isArray(r.fracturedMods) ? r.fracturedMods : []);
+            for (const m of r.mods.slice(0, 16)) {
+              const modClass = fracturedSet.has(m) ? "pth-mod pth-mod-fractured" : "pth-mod";
+              modsCell.appendChild(el("span", { class: modClass, text: m }));
+            }
             if (r.mods.length > 16) modsCell.appendChild(el("span", { class: "pth-muted", text: `+${r.mods.length - 16} more…` }));
           }
 

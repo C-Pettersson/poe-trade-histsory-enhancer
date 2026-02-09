@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PoE Trade History Enhancer
 // @namespace    https://github.com/claespettersson/poe-trade-history-enhancer
-// @version      1.1.0
+// @version      1.1.1
 // @updateURL    https://github.com/C-Pettersson/poe-trade-histsory-enhancer/raw/refs/heads/main/poe-trade-history-enhancer.user.js
 // @downloadURL  https://github.com/C-Pettersson/poe-trade-histsory-enhancer/raw/refs/heads/main/poe-trade-history-enhancer.user.js
 // @description  Enhances https://www.pathofexile.com/trade/history with a sortable/filterable table, "new" highlighting, and copy-item-text.
@@ -44,6 +44,7 @@
   const STORAGE_KEY = "pthEnhancer.settings.v1";
   const STORAGE_SEEN_KEY = "pthEnhancer.seenItemIds.v1";
   const STORAGE_ARCHIVE_PREFIX = "pthEnhancer.tradeArchive.v1.";
+  const STATS_TABLE_VISIBLE_ROWS = 8;
 
   /** @type {{onlyNew: boolean, hideOriginal: boolean, preferredCurrency: string, divineChaosPrice: (number|null)}} */
   const settings = loadSettings();
@@ -676,12 +677,15 @@
       .pth-mods{max-width:720px}
       .pth-mod{display:inline-block;margin:0 6px 4px 0;padding:2px 6px;border-radius:6px;background:#101a24;border:1px solid #1d2a36}
       .pth-mod-fractured{color:#a29162;border-color:rgba(162,145,98,.7);background:rgba(162,145,98,.08)}
-      .pth-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-top:10px}
+      .pth-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-top:10px;align-items:start}
       .pth-card{border:1px solid #1d2a36;background:#0f1720;border-radius:10px;padding:8px}
       .pth-card-title{font-weight:600;margin-bottom:6px}
       .pth-mini{width:100%;border-collapse:collapse}
       .pth-mini th,.pth-mini td{border-top:1px solid #1d2a36;padding:4px 6px;vertical-align:top}
       .pth-mini th{text-align:left;font-weight:600;opacity:.9}
+      .pth-mini-scroll{--pth-mini-visible-rows:8;max-height:calc(30px + (var(--pth-mini-visible-rows) * 28px));overflow-y:auto;scrollbar-gutter:stable}
+      .pth-mini-scroll .pth-mini{margin-top:0}
+      .pth-mini-scroll .pth-mini th{position:sticky;top:0;background:#0f1720;z-index:1}
       .pth-toast{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;background:#101a24;color:#e6eef7;border:1px solid #223444;border-radius:10px;padding:8px 12px;z-index:10000;opacity:0;pointer-events:none;transition:opacity .15s ease}
       .pth-toast.pth-show{opacity:1}
       html[data-pth-hide-original="1"] body > *:not(.pth-root){display:none !important}
@@ -936,11 +940,13 @@
     };
   }
 
-  function renderStatsTableCard(title, headerCells, rows) {
+  function renderStatsTableCard(title, headerCells, rows, { visibleRows = STATS_TABLE_VISIBLE_ROWS } = {}) {
     const card = el("div", { class: "pth-card" });
     card.appendChild(el("div", { class: "pth-card-title", text: title }));
 
     const table = el("table", { class: "pth-mini" });
+    const tableScroll = el("div", { class: "pth-mini-scroll" });
+    tableScroll.style.setProperty("--pth-mini-visible-rows", String(Math.max(3, Number(visibleRows) || STATS_TABLE_VISIBLE_ROWS)));
     const thead = el("thead");
     const tbody = el("tbody");
     table.appendChild(thead);
@@ -954,7 +960,8 @@
 
     if (!rows.length) tbody.appendChild(el("tr", {}, [el("td", { class: "pth-muted", text: "No data", attr: { colspan: "3" } })]));
 
-    card.appendChild(table);
+    tableScroll.appendChild(table);
+    card.appendChild(tableScroll);
     return card;
   }
 

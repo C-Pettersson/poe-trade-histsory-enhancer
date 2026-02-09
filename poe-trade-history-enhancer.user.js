@@ -5,7 +5,7 @@
 // @updateURL    https://github.com/C-Pettersson/poe-trade-histsory-enhancer/raw/refs/heads/main/poe-trade-history-enhancer.user.js
 // @downloadURL  https://github.com/C-Pettersson/poe-trade-histsory-enhancer/raw/refs/heads/main/poe-trade-history-enhancer.user.js
 // @description  Enhances https://www.pathofexile.com/trade/history with a sortable/filterable table, "new" highlighting, and copy-item-text.
-// @author       You
+// @author       Vauxite
 // @match        https://www.pathofexile.com/trade/history*
 // @run-at       document-start
 // @grant        GM_addStyle
